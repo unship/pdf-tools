@@ -56,16 +56,44 @@
   "Get the buffer position displaing PAGE."
   (- (* 4 page) 3))
 
+(defun pdf-roll--roll-overlay-p (ov pos)
+  "Non-nil if OV is a pdf-roll page/margin overlay spanning exactly POS."
+  (and (memq (overlay-get ov 'category) '(pdf-roll pdf-roll-margin))
+       (= (overlay-start ov) pos)
+       (= (overlay-end ov) (1+ pos))))
+
 (defun pdf-roll--pos-overlay (pos window)
-  "Return an overlay for WINDOW at POS.
-Window-lifecycle races can leave WINDOW with duplicate overlays at one
-position; renders then land on one copy while redisplay paints another,
+  "Return WINDOW's pdf-roll overlay at POS.
+Only overlays created by pdf-roll qualify (category `pdf-roll' /
+`pdf-roll-margin', spanning exactly [POS, POS+1)).  Foreign display
+overlays — e.g. image-mode's whole-buffer window overlay left over
+from non-roll display — must never be picked up: treating one as a
+page overlay makes a single page image shadow every position it
+covers (\"the same page repeats while scrolling\").
+Window-lifecycle races can also leave duplicates at one position;
+renders then land on one copy while redisplay paints another,
 freezing the visible image.  Delete strays so exactly one survives."
   (let ((matches (cl-remove-if-not
-                  (lambda (ov) (eq (overlay-get ov 'window) window))
+                  (lambda (ov)
+                    (and (eq (overlay-get ov 'window) window)
+                         (pdf-roll--roll-overlay-p ov pos)))
                   (overlays-at pos))))
     (dolist (extra (cdr matches)) (delete-overlay extra))
     (car matches)))
+
+(defun pdf-roll--sweep-foreign-overlays (window)
+  "Delete WINDOW's display overlays that were not created by pdf-roll.
+Under the roll, display is owned exclusively by the per-position page
+and margin overlays.  A foreign display overlay (image-mode's window
+overlay reappears via `image-mode-new-window-functions' on winprops
+creation) shadows the page images beneath it, so one stale image
+repeats over every position it covers."
+  (dolist (o (overlays-in (point-min) (point-max)))
+    (when (and (eq (overlay-get o 'window) window)
+               (overlay-get o 'display)
+               (not (memq (overlay-get o 'category)
+                          '(pdf-roll pdf-roll-margin))))
+      (delete-overlay o))))
 
 (defun pdf-roll-page-overlay (&optional page window)
   "Return overlay displaying PAGE in WINDOW.
@@ -79,12 +107,19 @@ Existing overlays are never touched, so the master set is preserved."
         (window (or window (selected-window))))
     (or (pdf-roll--pos-overlay pos window)
         (when (< pos (point-max))       ; buffer initialized for roll at all
+          (pdf-roll--sweep-foreign-overlays window)
           (dotimes (i (/ (point-max) 2))
             (let ((p (1+ (* 2 i))))
               (unless (pdf-roll--pos-overlay p window)
-                (let ((src (car (overlays-at p))))
+                (let ((src (cl-find-if (lambda (o)
+                                         (pdf-roll--roll-overlay-p o p))
+                                       (overlays-at p))))
                   (if src
-                      (overlay-put (copy-overlay src) 'window window)
+                      ;; 拷贝来的 display 可能是别的窗口的陈图——剥掉，
+                      ;; 让 display-page 按 (not display) 重新渲染本页
+                      (let ((c (copy-overlay src)))
+                        (overlay-put c 'window window)
+                        (overlay-put c 'display nil))
                     (let ((o (make-overlay p (1+ p))))
                       (overlay-put o 'category (if (= 1 (mod p 4))
                                                    'pdf-roll
@@ -223,6 +258,9 @@ It should be added to `pre-redisplay-functions' buffer locally."
   (with-demoted-errors "Error in image roll pre-redisplay: %S"
     (unless (pdf-roll-page-overlay 1 win)
       (pdf-roll-new-window-function win))
+    ;; 外来 display overlay（image-mode 窗口 overlay 经 winprops 创建路径
+    ;; 复活）会遮蔽其覆盖位置的页图——常态清扫，一个 redisplay 内收敛。
+    (pdf-roll--sweep-foreign-overlays win)
     (let* ((state (alist-get win pdf-roll--state))
            (pscrolling (memq last-command
                              '(pixel-scroll-precision pixel-scroll-start-momentum
