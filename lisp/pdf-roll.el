@@ -361,6 +361,17 @@ If PIXELS is non-nil N is number of pixels instead of lines."
    nil t))
 
 ;;; Minor mode
+(defun pdf-roll--protect-raw-write (_start _end)
+  "Refuse raw text writes of a rolled buffer.
+Under `pdf-view-roll-minor-mode' the buffer text is placeholder
+characters carrying the page overlays — NOT the PDF's bytes.  Raw
+write paths (`write-region', e.g. evil's `:w!') would silently
+overwrite the PDF file with those placeholders, destroying it.
+`save-buffer' is unaffected: `pdf-view--write-contents-function'
+saves through the epdfinfo process without touching buffer text."
+  (user-error
+   "pdf-roll: buffer text is placeholders, not the PDF; use `save-buffer'"))
+
 (defun pdf-roll-initialize (&rest _args)
   "Fun to initialize `pdf-view-roll-minor-mode'.
 It is also added to `revert-buffer-function'."
@@ -396,6 +407,11 @@ It is also added to `revert-buffer-function'."
 
          (add-hook 'pre-redisplay-functions 'pdf-roll-pre-redisplay nil t)
          (add-hook 'pdf-roll-after-change-page-hook 'pdf-history-before-change-page-hook nil t)
+         ;; Buffer text is now placeholders: block raw writes (they would
+         ;; clobber the PDF) and pointless placeholder auto-saves.
+         (add-hook 'write-region-annotate-functions
+                   #'pdf-roll--protect-raw-write nil t)
+         (auto-save-mode -1)
 
          (add-function :after (local 'revert-buffer-function) #'pdf-roll-initialize)
 
@@ -418,6 +434,8 @@ It is also added to `revert-buffer-function'."
 
          (remove-hook 'pre-redisplay-functions 'pdf-roll-pre-redisplay t)
          (remove-hook 'pdf-roll-after-change-page-hook 'pdf-history-before-change-page-hook t)
+         (remove-hook 'write-region-annotate-functions
+                      #'pdf-roll--protect-raw-write t)
 
          (kill-local-variable 'pdf-roll--state)
 
