@@ -57,14 +57,40 @@
   (- (* 4 page) 3))
 
 (defun pdf-roll--pos-overlay (pos window)
-  "Return an overlay for WINDOW at POS."
-  (cl-find window (overlays-at pos) :key (lambda (ov) (overlay-get ov 'window))))
+  "Return an overlay for WINDOW at POS.
+Window-lifecycle races can leave WINDOW with duplicate overlays at one
+position; renders then land on one copy while redisplay paints another,
+freezing the visible image.  Delete strays so exactly one survives."
+  (let ((matches (cl-remove-if-not
+                  (lambda (ov) (eq (overlay-get ov 'window) window))
+                  (overlays-at pos))))
+    (dolist (extra (cdr matches)) (delete-overlay extra))
+    (car matches)))
 
 (defun pdf-roll-page-overlay (&optional page window)
-  "Return overlay displaying PAGE in WINDOW."
-  (pdf-roll--pos-overlay
-   (pdf-roll-page-to-pos (or page (pdf-roll-page-at-current-pos)))
-   (or window (selected-window))))
+  "Return overlay displaying PAGE in WINDOW.
+If WINDOW's overlay for a position is missing — individual overlays can
+get lost to window-lifecycle races (frame/workspace churn), leaving
+`wrong-type-argument overlayp nil' errors and blank pages — repair the
+set for WINDOW in place: for every position lacking a WINDOW copy, copy
+any surviving overlay at that position, or recreate one from scratch.
+Existing overlays are never touched, so the master set is preserved."
+  (let ((pos (pdf-roll-page-to-pos (or page (pdf-roll-page-at-current-pos))))
+        (window (or window (selected-window))))
+    (or (pdf-roll--pos-overlay pos window)
+        (when (< pos (point-max))       ; buffer initialized for roll at all
+          (dotimes (i (/ (point-max) 2))
+            (let ((p (1+ (* 2 i))))
+              (unless (pdf-roll--pos-overlay p window)
+                (let ((src (car (overlays-at p))))
+                  (if src
+                      (overlay-put (copy-overlay src) 'window window)
+                    (let ((o (make-overlay p (1+ p))))
+                      (overlay-put o 'category (if (= 1 (mod p 4))
+                                                   'pdf-roll
+                                                 'pdf-roll-margin))
+                      (overlay-put o 'window window)))))))
+          (pdf-roll--pos-overlay pos window)))))
 
 (defun pdf-roll-page-at-current-pos ()
   "Page at point."
